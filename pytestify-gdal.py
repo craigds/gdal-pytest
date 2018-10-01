@@ -5,7 +5,7 @@ Converts GDAL's test suite to use pytest style assertions.
 
 import argparse
 
-from fissix.fixer_util import Comma, find_indentation, Newline
+from fissix.fixer_util import Comma, find_indentation, Newline, parenthesize
 from fissix.pygram import python_symbols as syms
 
 from bowler import Query, TOKEN
@@ -22,9 +22,10 @@ def kw(name, **kwargs):
     return Leaf(TOKEN.NAME, name, **kwargs)
 
 
-# TODO : Add this to fissix.fixer_util
 def Assert(test, message=None, **kwargs):
-    """Build an assertion statement"""
+    """
+    Build an assertion statement
+    """
     if not isinstance(test, list):
         test = [test]
     test[0].prefix = " "
@@ -41,6 +42,60 @@ def Assert(test, message=None, **kwargs):
     )
 
 
+def parenthesize_if_necessary(node):
+    # If not already parenthesized, parenthesize
+    for first_leaf in node.leaves():
+        if first_leaf.type in (TOKEN.LPAR, TOKEN.LBRACE, TOKEN.LSQB):
+            # Already parenthesized
+            return node
+        break
+    return parenthesize(node.clone())
+
+
+def invert_condition(condition):
+    """
+    Inverts a boolean expression, e.g.:
+        a == b
+        --> a != b
+
+        a > b
+        --> a <= b
+
+        a or b
+        --> not (a or b)
+
+        (a or b)
+        --> not (a or b)
+
+        a if b else c
+        --> not (a if b else c)
+    """
+    if condition.type == syms.comparison:
+        a, op, b = condition.children
+        op = condition.children[1]
+        if op.type == syms.comp_op:
+            if (op.children[0].value, op.children[1].value) == ("is", "not"):
+                return Node(syms.comparison, [a.clone(), kw("is"), b.clone()])
+            elif (op.children[0].value, op.children[1].value) == ("not", "in"):
+                return Node(syms.comparison, [a.clone(), kw("in"), b.clone()])
+            else:
+                raise NotImplementedError(f"unknown comp_op: {op!r}")
+        else:
+            inversions = {
+                "is": Node(syms.comp_op, [kw("is"), kw("not")], prefix=" "),
+                "in": Node(syms.comp_op, [kw("not"), kw("in")], prefix=" "),
+                "==": Leaf(TOKEN.NOTEQUAL, "!=", prefix=" "),
+                "!=": Leaf(TOKEN.EQEQUAL, "==", prefix=" "),
+                ">": Leaf(TOKEN.LESSEQUAL, "<=", prefix=" "),
+                "<": Leaf(TOKEN.GREATEREQUAL, ">=", prefix=" "),
+                "<=": Leaf(TOKEN.GREATER, ">", prefix=" "),
+                ">=": Leaf(TOKEN.LESS, "<", prefix=" "),
+            }
+            return Node(syms.comparison, [a.clone(), inversions[op.value], b.clone()])
+    else:
+        return Node(syms.not_test, [kw("not"), parenthesize(condition.clone())])
+
+
 def gdaltest_reason_to_assert(node, capture, filename):
     if flags["debug"]:
         print("expression: %s" % capture)
@@ -53,7 +108,9 @@ def gdaltest_reason_to_assert(node, capture, filename):
         # only handle fails for now, tackle others later
         return
 
-    assertion = Assert([condition.clone()], reason.clone(), prefix=node.prefix)
+    assertion = Assert(
+        [invert_condition(condition)], reason.clone(), prefix=node.prefix
+    )
     if flags["debug"]:
         print(f"Replacing:\n\t{node}")
         print(f"With: {assertion}")
