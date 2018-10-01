@@ -136,7 +136,8 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
 
 def gdaltest_skipfail_reason_to_if(node, capture, filename):
     """
-    Converts a more complex if statement into an assertion.
+    Updates a more complex if statement.
+    Keeps it as an if statement, but adds an assertion or `pytest.skip()`.
 
     This handles cases where there are extra print() calls in the if statement, etc.
 
