@@ -5,7 +5,7 @@ Converts GDAL's test suite to use pytest style assertions.
 
 import argparse
 
-from fissix.fixer_util import Comma, find_indentation, Newline, parenthesize
+from fissix.fixer_util import Comma, Newline, parenthesize, Attr, ArgList
 from fissix.pygram import python_symbols as syms
 
 from bowler import Query, TOKEN
@@ -96,9 +96,19 @@ def invert_condition(condition):
         return Node(syms.not_test, [kw("not"), parenthesize(condition.clone())])
 
 
-def gdaltest_reason_to_assert(node, capture, filename):
+def gdaltest_fail_reason_to_assert(node, capture, filename):
+    """
+    Converts an entire if statement into an assertion.
+
+    if x == y:
+        gdal.post_reason('foo')
+        return 'fail'
+
+    -->
+        assert x != y, 'foo'
+    """
     if flags["debug"]:
-        print("expression: %s" % capture)
+        print(f"expression: {capture}")
 
     condition = capture["condition"]
     reason = capture["reason"]
@@ -116,16 +126,70 @@ def gdaltest_reason_to_assert(node, capture, filename):
         print(f"With: {assertion}")
         print()
 
-    # TODO: handle if statements with `else` blocks; atm this causes syntax errors there!
-    # FIXME: why is this munging indentation on the next line in the first place?
-    #        it also seems to remove comments immediately following the if statement.
-    indent_next_line = find_indentation(node.next_sibling)
-    node.replace([assertion, Newline(), Leaf(TOKEN.INDENT, indent_next_line)])
+    # Trailing whitespace and any comments after the if statement are captured
+    # in the prefix for the dedent node. Copy it to the following node.
+    dedent = capture["dedent"]
+    next_node = node.next_sibling
+    node.replace([assertion, Newline()])
+    next_node.prefix = dedent.prefix
+
+
+def gdaltest_skipfail_reason_to_if(node, capture, filename):
+    """
+    Converts a more complex if statement into an assertion.
+
+    This handles cases where there are extra print() calls in the if statement, etc.
+
+    if x == y:
+        print('everything is broken')
+        gdal.post_reason('foo')
+        return 'fail'
+
+    -->
+        if x == y:
+            print('everything is broken')
+            assert False, 'foo'
+
+    This also handles 'skip' cases:
+
+    if x == y:
+        gdal.post_reason('foo')
+        return 'skip'
+
+    -->
+        if x == y:
+            pytest.skip('foo')
+    """
+    if flags["debug"]:
+        print(f"expression: {capture}")
+
+    returntype = capture["returntype"].value[1:-1]
+    if returntype not in ("skip", "fail"):
+        return
+
+    # Remove the gdal.post_reason() statement altogether. Preserve whitespace
+    reason = [capture["reason"].clone()]
+    prefix = capture["post_reason_call"].prefix
+    next_node = capture["post_reason_call"].next_sibling
+    capture["post_reason_call"].remove()
+    next_node.prefix = prefix
+
+    # Replace the return statement with a call to pytest.skip() or assert False
+    if returntype == "skip":
+        replacement = Attr(
+            kw("pytest", prefix=capture["return_call"].prefix), kw("skip")
+        ) + [ArgList(reason)]
+    else:
+        replacement = Assert(
+            [kw("False")], reason, prefix=capture["return_call"].prefix
+        )
+
+    capture["return_call"].replace(replacement)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Converts x-unit style tests to be pytest-style where possible."
+        description="Converts GDAL's test assertions to be pytest-style where possible."
     )
     parser.add_argument(
         "--no-input",
@@ -149,22 +213,12 @@ def main():
         help="Spit out debugging information",
     )
     parser.add_argument(
-        "--skip-multiline-expressions",
-        default=False,
-        action="store_true",
-        help=(
-            "Skip handling lines that contain multiline expressions. "
-            "The code isn't yet able to handle them well. Output is valid but not pretty"
-        ),
-    )
-    parser.add_argument(
         "files", nargs="+", help="The python source file(s) to operate on."
     )
     args = parser.parse_args()
 
     # No way to pass this to .modify() callables, so we just set it at module level
     flags["debug"] = args.debug
-    flags["skip_multiline_expressions"] = args.skip_multiline_expressions
 
     (
         Query(*args.files)
@@ -179,7 +233,7 @@ def main():
                     simple_stmt<
                         power<
                             "gdaltest" trailer< "." "post_reason" >
-                            trailer< "(" reason=STRING ")" >
+                            trailer< "(" reason=any ")" >
                         >
                         any
                     >
@@ -187,11 +241,38 @@ def main():
                         return_stmt< "return" returntype=STRING >
                         any
                     >
-                    any
+                    dedent=any
                 >
             >
         """
-        ).modify(callback=gdaltest_reason_to_assert)
+        )
+        .modify(callback=gdaltest_fail_reason_to_assert)
+        .select(
+            """
+            if_stmt<
+                "if" any ":"
+                suite<
+                    any any
+                    any*
+                    post_reason_call=simple_stmt<
+                        power<
+                            "gdaltest" trailer< "." "post_reason" >
+                            trailer< "(" reason=any ")" >
+                        >
+                        any
+                    >
+                    any*
+                    simple_stmt<
+                        return_call=return_stmt< "return" returntype=STRING >
+                        any
+                    >
+                    any*
+                    dedent=any
+                >
+            >
+        """
+        )
+        .modify(callback=gdaltest_skipfail_reason_to_if)
         # Actually run all of the above.
         .execute(
             # interactive diff implies write (for the bits the user says 'y' to)
