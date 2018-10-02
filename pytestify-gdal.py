@@ -5,7 +5,16 @@ Converts GDAL's test suite to use pytest style assertions.
 
 import argparse
 
-from fissix.fixer_util import Comma, Newline, parenthesize, Attr, ArgList
+from fissix.fixer_util import (
+    Comma,
+    Newline,
+    parenthesize,
+    Attr,
+    ArgList,
+    find_root,
+    find_binding,
+    touch_import,
+)
 from fissix.pygram import python_symbols as syms
 
 from bowler import Query, TOKEN
@@ -96,6 +105,54 @@ def invert_condition(condition):
         return Node(syms.not_test, [kw("not"), parenthesize(condition.clone())])
 
 
+def _rename_test(node, filename):
+    """
+    Renames one test to `test_<name>`
+    """
+    name = node.value
+    root = find_root(node)
+    def_statement = find_binding(name, root)
+
+    if name in ("None",):
+        # why are these there?
+        return
+
+    if not name.startswith("test_"):
+        name = f"test_{name}"
+
+        # def_statement can be None if the test doesn't exist.
+        # Could happen if it was referenced in multiple places;
+        # the first time we came across it we renamed it.
+        if def_statement is not None:
+            # Rename the function
+            def_statement.children[1].value = name
+            def_statement.children[1].changed()
+
+        # Rename the reference
+        node.value = name
+        node.changed()
+
+
+def rename_tests(node, capture, filename):
+    """
+    Renames all test functions to `test_<name>` if they're not already.
+
+    Detects tests by looking in the `gdaltest_list` var.
+    """
+    if flags["debug"]:
+        print(f"renaming {filename} tests: {capture!r}")
+
+    if capture.get("testname"):
+        # one test
+        tok = capture["testname"]
+        _rename_test(tok, filename)
+    else:
+        # multiple tests in a list
+        for tok in list(capture["testnames"].children):
+            if tok.type == TOKEN.NAME:
+                _rename_test(tok, filename)
+
+
 def gdaltest_fail_reason_to_assert(node, capture, filename):
     """
     Converts an entire if statement into an assertion.
@@ -164,7 +221,7 @@ def gdaltest_skipfail_reason_to_if(node, capture, filename):
     if flags["debug"]:
         print(f"expression: {capture}")
 
-    returntype = capture["returntype"].value[1:-1]
+    returntype = capture["returntype"].value[-5:-1]
     if returntype not in ("skip", "fail"):
         return
 
@@ -180,12 +237,38 @@ def gdaltest_skipfail_reason_to_if(node, capture, filename):
         replacement = Attr(
             kw("pytest", prefix=capture["return_call"].prefix), kw("skip")
         ) + [ArgList(reason)]
+        # Adds a 'import pytest' if there wasn't one already
+        touch_import(None, "pytest", node)
     else:
         replacement = Assert(
             [kw("False")], reason, prefix=capture["return_call"].prefix
         )
 
     capture["return_call"].replace(replacement)
+
+
+def remove_return_success(node, capture, filename):
+    """
+    return 'success'
+        -->
+        If it's halfway through a function, it gets replaced by just `return`.
+        Otherwise, it just gets removed.
+    """
+
+    value = capture["returntype"].value[-8:-1]
+    if value == "success":
+        # Check if it's at the end of the function
+        func = node
+        levels = 0
+        while func.type != syms.funcdef:
+            func = func.parent
+            levels += 1
+
+        if levels > 2:
+            # return statement is indented, ie we can't remove it
+            capture["return_call"].replace(kw("return", prefix=""))
+        else:
+            node.remove()
 
 
 def main():
@@ -223,8 +306,30 @@ def main():
 
     (
         Query(*args.files)
-        # NOTE: You can append as many .select().modify() bits as you want to one query.
-        # Each .modify() acts only on the .select[_*]() immediately prior.
+        # 1. Rename all tests `test_*`, and removes the `gdaltest_list` assignments.
+        .select(
+            """
+                power<
+                    "gdaltest_list" trailer< "." "append" >
+                    trailer< "(" testname=NAME ")" >
+                >
+            |
+                power<
+                    "gdaltest_list" trailer< "." "insert" >
+                    trailer< "(" any "," testname=NAME ")" >
+                >
+            |
+                expr_stmt< "gdaltest_list" "=" atom< "["
+                    testnames=listmaker
+                "]" > >
+            |
+                expr_stmt< "gdaltest_list" "=" atom< "("
+                    testnames=testlist_gexp
+                ")" > >
+            """
+        )
+        .modify(rename_tests)
+        # 2. Turn basic if/post_reason clauses into assertions
         .select(
             """
             if_stmt<
@@ -248,6 +353,7 @@ def main():
         """
         )
         .modify(callback=gdaltest_fail_reason_to_assert)
+        # 3. Replace further post_reason calls
         .select(
             """
             if_stmt<
@@ -274,6 +380,17 @@ def main():
         """
         )
         .modify(callback=gdaltest_skipfail_reason_to_if)
+        # 4. Remove all `return 'success'`, or replace with `return` if they're in
+        # the middle of the function
+        .select(
+            """
+            simple_stmt<
+                return_call=return_stmt< "return" returntype=STRING >
+                any
+            >
+            """
+        )
+        .modify(callback=remove_return_success)
         # Actually run all of the above.
         .execute(
             # interactive diff implies write (for the bits the user says 'y' to)
