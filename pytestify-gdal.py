@@ -62,14 +62,29 @@ def Assert(test, message=None, **kwargs):
     )
 
 
-def parenthesize_if_necessary(node):
-    # If not already parenthesized, parenthesize
+def is_multiline(node):
+    if isinstance(node, list):
+        return any(is_multiline(n) for n in node)
+
+    for leaf in node.leaves():
+        if "\n" in leaf.prefix:
+            return True
+    return False
+
+
+def parenthesize_if_not_already(node):
     for first_leaf in node.leaves():
         if first_leaf.type in (TOKEN.LPAR, TOKEN.LBRACE, TOKEN.LSQB):
             # Already parenthesized
             return node
         break
     return parenthesize(node.clone())
+
+
+def parenthesize_if_multiline(node):
+    if is_multiline(node):
+        return parenthesize_if_not_already(node)
+    return node
 
 
 def invert_condition(condition):
@@ -187,7 +202,9 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
         return
 
     assertion = Assert(
-        [invert_condition(condition)], reason.clone(), prefix=node.prefix
+        [invert_condition(parenthesize_if_multiline(condition))],
+        parenthesize_if_multiline(reason.clone()),
+        prefix=node.prefix,
     )
     if flags["debug"]:
         print(f"Replacing:\n\t{node}")
@@ -237,7 +254,7 @@ def gdaltest_skipfail_reason_to_if(node, capture, filename):
         return
 
     # Remove the gdal.post_reason() statement altogether. Preserve whitespace
-    reason = [capture["reason"].clone()]
+    reason = capture["reason"].clone()
     prefix = capture["post_reason_call"].prefix
     next_node = capture["post_reason_call"].next_sibling
     capture["post_reason_call"].remove()
@@ -246,13 +263,15 @@ def gdaltest_skipfail_reason_to_if(node, capture, filename):
     # Replace the return statement with a call to pytest.skip() or assert False
     if returntype == "skip":
         replacement = Attr(
-            kw("pytest", prefix=capture["return_call"].prefix), kw("skip")
-        ) + [ArgList(reason)]
+            kw("pytest", prefix=capture["return_call"].prefix), kw("skip", prefix="")
+        ) + [ArgList([reason])]
         # Adds a 'import pytest' if there wasn't one already
         touch_import(None, "pytest", node)
     else:
         replacement = Assert(
-            [kw("False")], reason, prefix=capture["return_call"].prefix
+            [kw("False")],
+            parenthesize_if_multiline(reason),
+            prefix=capture["return_call"].prefix,
         )
 
     capture["return_call"].replace(replacement)
@@ -264,52 +283,53 @@ def remove_return_success(node, capture, filename):
         -->
         If it's halfway through a function, it gets replaced by just `return`.
         Otherwise, it just gets removed.
-    """
 
-    value = string_value(capture["returntype"])
-    if value == "success":
-        # Check if it's at the end of the function
-        func = node
-        levels = 0
-        while func.type != syms.funcdef:
-            func = func.parent
-            levels += 1
-
-        if levels > 2:
-            # return statement is indented, ie we can't remove it
-            capture["return_call"].replace(kw("return", prefix=""))
-        else:
-            node.remove()
-
-
-def replace_ternary_return_with_assert(node, capture, filename):
-    """
     return 'success' if foo else 'fail'
-
-    --> assert foo
+        --> assert foo
     """
     if flags["debug"]:
         print(f"expression: {capture}")
 
-    true_result = string_value(capture['true_result'])
-    false_result = string_value(capture['false_result'])
+    if capture.get("comparison"):
+        # ternary (`return x if y else z`)
+        # convert to assert statement.
+        true_result = string_value(capture["true_result"])
+        false_result = string_value(capture["false_result"])
 
-    invert = False
-    if true_result != 'success':
-        invert = True
-        true_result, false_result = false_result, true_result
-    if true_result != 'success' or false_result != 'fail':
-        # dunno what this is.
-        return
+        invert = False
+        if true_result != "success":
+            invert = True
+            true_result, false_result = false_result, true_result
+        if true_result != "success" or false_result != "fail":
+            # dunno what this is.
+            return
 
-    comparison = capture['comparison'].clone()
+        comparison = capture["comparison"].clone()
 
-    if invert:
-        comparison = invert_condition(comparison)
+        if invert:
+            comparison = invert_condition(comparison)
 
-    capture['return_call'].replace(
-        Assert([comparison], prefix=capture['return_call'].prefix)
-    )
+        capture["return_call"].replace(
+            Assert(
+                [parenthesize_if_multiline(comparison)],
+                prefix=capture["return_call"].prefix,
+            )
+        )
+    else:
+        value = string_value(capture["returnvalue"])
+        if value == "success":
+            # Check if it's at the end of the function
+            func = node
+            levels = 0
+            while func.type != syms.funcdef:
+                func = func.parent
+                levels += 1
+
+            if levels > 2:
+                # return statement is indented, ie we can't remove it
+                capture["return_call"].replace(kw("return", prefix=""))
+            else:
+                node.remove()
 
 
 def main():
@@ -345,7 +365,7 @@ def main():
     # No way to pass this to .modify() callables, so we just set it at module level
     flags["debug"] = args.debug
 
-    (
+    queries = [
         Query(*args.files)
         # 1. Rename all tests `test_*`, and removes the `gdaltest_list` assignments.
         .select(
@@ -368,8 +388,7 @@ def main():
                     testnames=testlist_gexp
                 ")" > >
             """
-        )
-        .modify(rename_tests)
+        ).modify(rename_tests)
         # 2. Turn basic if/post_reason clauses into assertions
         .select(
             """
@@ -392,8 +411,7 @@ def main():
                 >
             >
         """
-        )
-        .modify(callback=gdaltest_fail_reason_to_assert)
+        ).modify(callback=gdaltest_fail_reason_to_assert)
         # 3. Replace further post_reason calls
         .select(
             """
@@ -419,39 +437,38 @@ def main():
                 >
             >
         """
-        )
-        .modify(callback=gdaltest_skipfail_reason_to_if)
-        # 4. convert ternary returns to asserts
+        ).modify(callback=gdaltest_skipfail_reason_to_if),
+        Query(*args.files)
+        # 4. Remove all `return 'success'`, or convert ternary ones to asserts.
         .select(
             """
             simple_stmt<
-                return_call=return_stmt< "return" test<
-                    true_result=STRING "if" comparison=any "else" false_result=STRING
-                > >
+                return_call=return_stmt< "return"
+                    (
+                        test<
+                            true_result=STRING "if" comparison=any "else" false_result=STRING
+                        >
+                    |
+                        returnvalue=STRING
+                    )
+                >
                 any
             >
             """
-        )
-        .modify(replace_ternary_return_with_assert)
-        # 5. Remove all `return 'success'`, or replace with `return` if they're in
-        # the middle of the function
-        .select(
-            """
-            simple_stmt<
-                return_call=return_stmt< "return" returntype=STRING >
-                any
-            >
-            """
-        )
-        .modify(callback=remove_return_success)
+        ).modify(callback=remove_return_success),
+    ]
 
+    # FIXME: running all of these as *one* query should be possible,
+    # but causes strange `patch` conflict errors.
+    # Need to describe the issue and report to Bowler.
+    # But it works as-is, just takes a little longer.
+    for q in queries:
         # Actually run all of the above.
-        .execute(
+        q.execute(
             # interactive diff implies write (for the bits the user says 'y' to)
             interactive=(args.interactive and args.write),
             write=args.write,
         )
-    )
 
 
 if __name__ == "__main__":
