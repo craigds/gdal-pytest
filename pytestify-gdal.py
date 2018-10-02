@@ -31,6 +31,17 @@ def kw(name, **kwargs):
     return Leaf(TOKEN.NAME, name, **kwargs)
 
 
+def string_value(s):
+    """
+    Removes quotes and modifiers from a string literal,
+    returning just the actual value.
+    """
+    if not isinstance(s, str):
+        s = s.value
+    quote = s[-1]
+    return s.split(quote, 1)[1][:-1]
+
+
 def Assert(test, message=None, **kwargs):
     """
     Build an assertion statement
@@ -221,7 +232,7 @@ def gdaltest_skipfail_reason_to_if(node, capture, filename):
     if flags["debug"]:
         print(f"expression: {capture}")
 
-    returntype = capture["returntype"].value[-5:-1]
+    returntype = string_value(capture["returntype"])
     if returntype not in ("skip", "fail"):
         return
 
@@ -255,7 +266,7 @@ def remove_return_success(node, capture, filename):
         Otherwise, it just gets removed.
     """
 
-    value = capture["returntype"].value[-8:-1]
+    value = string_value(capture["returntype"])
     if value == "success":
         # Check if it's at the end of the function
         func = node
@@ -269,6 +280,36 @@ def remove_return_success(node, capture, filename):
             capture["return_call"].replace(kw("return", prefix=""))
         else:
             node.remove()
+
+
+def replace_ternary_return_with_assert(node, capture, filename):
+    """
+    return 'success' if foo else 'fail'
+
+    --> assert foo
+    """
+    if flags["debug"]:
+        print(f"expression: {capture}")
+
+    true_result = string_value(capture['true_result'])
+    false_result = string_value(capture['false_result'])
+
+    invert = False
+    if true_result != 'success':
+        invert = True
+        true_result, false_result = false_result, true_result
+    if true_result != 'success' or false_result != 'fail':
+        # dunno what this is.
+        return
+
+    comparison = capture['comparison'].clone()
+
+    if invert:
+        comparison = invert_condition(comparison)
+
+    capture['return_call'].replace(
+        Assert([comparison], prefix=capture['return_call'].prefix)
+    )
 
 
 def main():
@@ -380,7 +421,19 @@ def main():
         """
         )
         .modify(callback=gdaltest_skipfail_reason_to_if)
-        # 4. Remove all `return 'success'`, or replace with `return` if they're in
+        # 4. convert ternary returns to asserts
+        .select(
+            """
+            simple_stmt<
+                return_call=return_stmt< "return" test<
+                    true_result=STRING "if" comparison=any "else" false_result=STRING
+                > >
+                any
+            >
+            """
+        )
+        .modify(replace_ternary_return_with_assert)
+        # 5. Remove all `return 'success'`, or replace with `return` if they're in
         # the middle of the function
         .select(
             """
@@ -391,6 +444,7 @@ def main():
             """
         )
         .modify(callback=remove_return_success)
+
         # Actually run all of the above.
         .execute(
             # interactive diff implies write (for the bits the user says 'y' to)
