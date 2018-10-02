@@ -326,8 +326,11 @@ def remove_return_success(node, capture, filename):
                 levels += 1
 
             if levels > 2:
-                # return statement is indented, ie we can't remove it
-                capture["return_call"].replace(kw("return", prefix=""))
+                # return statement is indented, ie we can't remove it.
+                # But we can replace it with a bare `return`
+                capture["return_call"].replace(
+                    capture["return_call"].children[0].clone()
+                )
             else:
                 node.remove()
 
