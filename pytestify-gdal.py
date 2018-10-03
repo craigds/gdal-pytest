@@ -131,32 +131,57 @@ def invert_condition(condition):
         return Node(syms.not_test, [kw("not"), parenthesize(condition.clone())])
 
 
+def get_function_ancestor_node(node):
+    """
+    Returns the function node that contains the given node, or None.
+    """
+    parent = node
+    while parent is not None and parent.type != syms.funcdef:
+        parent = parent.parent
+    return parent
+
+
 def _rename_test(node, filename):
     """
     Renames one test to `test_<name>`
     """
-    name = node.value
+    old_name = node.value
     root = find_root(node)
-    def_statement = find_binding(name, root)
+    def_statement = find_binding(old_name, root)
 
-    if name in ("None",):
+    if old_name in ("None",):
         # why are these there?
         return
 
-    if not name.startswith("test_"):
-        name = f"test_{name}"
+    if not old_name.startswith("test_"):
+        new_name = f"test_{old_name}"
 
         # def_statement can be None if the test doesn't exist.
         # Could happen if it was referenced in multiple places;
         # the first time we came across it we renamed it.
         if def_statement is not None:
             # Rename the function
-            def_statement.children[1].value = name
+            def_statement.children[1].value = new_name
             def_statement.children[1].changed()
 
-        # Rename the reference
-        node.value = name
-        node.changed()
+        # Rename all references, including `node`
+        for n in root.leaves():
+            if n.type == TOKEN.NAME and n.value == old_name:
+                # Don't include dotted names
+                if n.parent.type == syms.trailer and n.prev_sibling and n.prev_sibling.value == '.':
+                    continue
+
+                # This is probably a reference to the test function
+                # However, we need to check in case it's a separate local var.
+                # Figure out if we're in a function, and see if there's a binding for
+                # the same name
+                func_node = get_function_ancestor_node(n)
+                if func_node and find_binding(old_name, func_node):
+                    # This is a local var with the same name, don't rename it
+                    continue
+
+                n.value = new_name
+                n.changed()
 
 
 def rename_tests(node, capture, filename):
