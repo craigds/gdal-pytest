@@ -73,12 +73,17 @@ def is_multiline(node):
 
 
 def parenthesize_if_not_already(node):
+    if node.type == syms.power:
+        # don't have to parenthesize, it's a function call
+        return node
     for first_leaf in node.leaves():
         if first_leaf.type in (TOKEN.LPAR, TOKEN.LBRACE, TOKEN.LSQB):
             # Already parenthesized
             return node
         break
-    return parenthesize(node.clone())
+    node = node.clone()
+    node.prefix = ''
+    return parenthesize(node)
 
 
 def parenthesize_if_multiline(node):
@@ -127,6 +132,9 @@ def invert_condition(condition):
                 ">=": Leaf(TOKEN.LESS, "<", prefix=" "),
             }
             return Node(syms.comparison, [a.clone(), inversions[op.value], b.clone()])
+    elif condition.type == syms.not_test:
+        # `not x` --> just remove the `not`
+        return condition.children[1].clone()
     else:
         return Node(syms.not_test, [kw("not"), parenthesize(condition.clone())])
 
@@ -234,7 +242,7 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
         return
 
     assertion = Assert(
-        [invert_condition(parenthesize_if_multiline(condition))],
+        [parenthesize_if_multiline(invert_condition(condition))],
         reason,
         prefix=node.prefix,
     )
