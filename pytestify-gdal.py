@@ -459,6 +459,12 @@ def main():
         help="Spit out debugging information",
     )
     parser.add_argument(
+        "--silent",
+        default=False,
+        action="store_true",
+        help="Don't spit out a diff, just write changes to files",
+    )
+    parser.add_argument(
         "--step",
         default=False,
         action="store",
@@ -589,7 +595,7 @@ def main():
         ).modify(callback=remove_return_success)
     }
 
-    if args.step:
+    if args.step is not None:
         query = steps[args.step](query)
     else:
         for i in sorted(steps.keys()):
@@ -599,6 +605,7 @@ def main():
         # interactive diff implies write (for the bits the user says 'y' to)
         interactive=(args.interactive and args.write),
         write=args.write,
+        silent=args.silent,
     )
 
 
