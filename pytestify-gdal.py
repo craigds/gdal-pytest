@@ -131,12 +131,12 @@ def invert_condition(condition):
         return Node(syms.not_test, [kw("not"), parenthesize(condition.clone())])
 
 
-def get_function_ancestor_node(node):
+def get_ancestor_of_type(node, typ):
     """
-    Returns the function node that contains the given node, or None.
+    Returns the closest ancestor of the given type, or None.
     """
     parent = node
-    while parent is not None and parent.type != syms.funcdef:
+    while parent is not None and parent.type != typ:
         parent = parent.parent
     return parent
 
@@ -175,7 +175,7 @@ def _rename_test(node, filename):
                 # However, we need to check in case it's a separate local var.
                 # Figure out if we're in a function, and see if there's a binding for
                 # the same name
-                func_node = get_function_ancestor_node(n)
+                func_node = get_ancestor_of_type(n, syms.funcdef)
                 if func_node and find_binding(old_name, func_node):
                     # This is a local var with the same name, don't rename it
                     continue
@@ -246,30 +246,33 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
 
 def gdaltest_skipfail_reason_to_if(node, capture, filename):
     """
-    Updates a more complex if statement.
-    Keeps it as an if statement, but adds an assertion or `pytest.skip()`.
+    Replaces a generic call to `return 'skip'` or `return 'fail'`,
+    with a `pytest.skip()` or `pytest.fail()`.
 
-    This handles cases where there are extra print() calls in the if statement, etc.
+    If there's a call to `gdal.post_reason()` immediately preceding
+    the return statement, uses that reason as the argument to the
+    skip/fail function.
+    Ignores/preserves print() calls between the two.
 
-    if x == y:
-        print('everything is broken')
+    Examples:
+
         gdal.post_reason('foo')
+        print('everything is broken')
         return 'fail'
-
-    -->
-        if x == y:
+        -->
             print('everything is broken')
-            assert False, 'foo'
+            pytest.fail('foo')
 
-    This also handles 'skip' cases:
 
-    if x == y:
         gdal.post_reason('foo')
         return 'skip'
-
-    -->
-        if x == y:
+        -->
             pytest.skip('foo')
+
+
+        return 'skip'
+        -->
+            pytest.skip()
     """
     if flags["debug"]:
         print(f"expression: {capture}")
@@ -278,28 +281,41 @@ def gdaltest_skipfail_reason_to_if(node, capture, filename):
     if returntype not in ("skip", "fail"):
         return
 
-    # Remove the gdal.post_reason() statement altogether. Preserve whitespace
-    reason = capture["reason"].clone()
-    prefix = capture["post_reason_call"].prefix
-    next_node = capture["post_reason_call"].next_sibling
-    capture["post_reason_call"].remove()
-    next_node.prefix = prefix
+    args = []
+    if capture.get('post_reason_call'):
+        # Remove the gdal.post_reason() statement altogether. Preserve whitespace
+        reason = capture["reason"].clone()
+        prefix = capture["post_reason_call"].prefix
+        next_node = capture["post_reason_call"].next_sibling
+        capture["post_reason_call"].remove()
+        next_node.prefix = prefix
+        args = [reason]
 
-    # Replace the return statement with a call to pytest.skip() or assert False
-    if returntype == "skip":
-        replacement = Attr(
-            kw("pytest", prefix=capture["return_call"].prefix), kw("skip", prefix="")
-        ) + [ArgList([reason])]
-        # Adds a 'import pytest' if there wasn't one already
-        touch_import(None, "pytest", node)
-    else:
-        replacement = Assert(
-            [kw("False")],
-            parenthesize_if_multiline(reason),
-            prefix=capture["return_call"].prefix,
-        )
+    # Replace the return statement with a call to pytest.skip() or pytest.fail().
+    # Include the reason message if there was one.
+    replacement = Attr(
+        kw("pytest", prefix=capture["return_call"].prefix), kw(returntype, prefix="")
+    ) + [ArgList(args)]
+
+    # Adds a 'import pytest' if there wasn't one already
+    touch_import(None, "pytest", node)
 
     capture["return_call"].replace(replacement)
+
+
+def remove_node_and_fix_empty_functions(node):
+    """
+    After removing a node from a function, it might possibly be empty.
+    So call this to remove the node, then (if needed) add a 'pass' statement
+    """
+    suite = get_ancestor_of_type(node, syms.suite)
+    for c in suite.children:
+        if c != node and c.type not in (TOKEN.DEDENT, TOKEN.INDENT, TOKEN.NEWLINE):
+            node.remove()
+            return
+
+    # No children. Add a `pass`
+    node.replace(Leaf(TOKEN.NAME, 'pass'))
 
 
 def remove_return_success(node, capture, filename):
@@ -357,7 +373,7 @@ def remove_return_success(node, capture, filename):
                     capture["return_call"].children[0].clone()
                 )
             else:
-                node.remove()
+                remove_node_and_fix_empty_functions(node)
 
 
 def main():
@@ -440,29 +456,22 @@ def main():
             >
         """
         ).modify(callback=gdaltest_fail_reason_to_assert)
-        # 3. Replace further post_reason calls
+        # 3. Replace further post_reason calls and skip/fail returns
         .select(
             """
-            if_stmt<
-                "if" any ":"
-                suite<
-                    any any
-                    any*
-                    post_reason_call=simple_stmt<
-                        power<
-                            "gdaltest" trailer< "." "post_reason" >
-                            trailer< "(" reason=any ")" >
-                        >
-                        any
+            [
+                post_reason_call=simple_stmt<
+                    power<
+                        "gdaltest" trailer< "." "post_reason" >
+                        trailer< "(" reason=any ")" >
                     >
-                    any*
-                    simple_stmt<
-                        return_call=return_stmt< "return" returntype=STRING >
-                        any
-                    >
-                    any*
-                    dedent=any
+                    any
                 >
+                any*
+            ]
+            simple_stmt<
+                return_call=return_stmt< "return" returntype=STRING >
+                any
             >
         """
         ).modify(callback=gdaltest_skipfail_reason_to_if),
