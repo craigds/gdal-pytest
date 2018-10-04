@@ -219,13 +219,14 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
         print(f"expression: {capture}")
 
     condition = capture["condition"]
-    reason = capture["reason"]
+    reason = capture.get("reason")
 
-    if reason.type == TOKEN.STRING and string_value(reason) == 'fail':
-        # kind of an unhelpful message, just don't have a message.
-        reason = None
-    else:
-        reason = parenthesize_if_multiline(reason.clone())
+    if reason:
+        if reason.type == TOKEN.STRING and string_value(reason) == 'fail':
+            # kind of an unhelpful message, just don't have a message.
+            reason = None
+        else:
+            reason = parenthesize_if_multiline(reason.clone())
 
     returntype = capture["returntype"].value[1:-1]
     if returntype != "fail":
@@ -539,13 +540,15 @@ def main():
                 "if" condition=any ":"
                 suite<
                     any any
-                    simple_stmt<
-                        power<
-                            "gdaltest" trailer< "." "post_reason" >
-                            trailer< "(" reason=any ")" >
+                    [
+                        simple_stmt<
+                            power<
+                                "gdaltest" trailer< "." "post_reason" >
+                                trailer< "(" reason=any ")" >
+                            >
+                            any
                         >
-                        any
-                    >
+                    ]
                     simple_stmt<
                         return_stmt< "return" returntype=STRING >
                         any
@@ -560,14 +563,16 @@ def main():
             """
                 any<
                     any*
-                    post_reason_call=simple_stmt<
-                        power<
-                            "gdaltest" trailer< "." "post_reason" >
-                            trailer< "(" reason=any ")" >
+                    [
+                        post_reason_call=simple_stmt<
+                            power<
+                                "gdaltest" trailer< "." "post_reason" >
+                                trailer< "(" reason=any ")" >
+                            >
+                            any
                         >
-                        any
-                    >
-                    any*
+                        any*
+                    ]
                     simple_stmt<
                         return_call=return_stmt< "return" returntype=STRING >
                         any
