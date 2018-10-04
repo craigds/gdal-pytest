@@ -318,6 +318,55 @@ def remove_node_and_fix_empty_functions(node):
     node.replace(Leaf(TOKEN.NAME, 'pass'))
 
 
+def remove_success_expectations(node, capture, filename):
+    """
+    We're about to remove the 'success' return value of all the helpers,
+    and just let them pytest.fail() themselves.
+
+    So we need to remove where tests are expecting them to return 'success'.
+
+    if x() != 'success':
+        return 'fail'
+
+    --> x()
+    """
+
+    if capture['returntype'].type not in (TOKEN.STRING, TOKEN.NAME):
+        return
+
+    if capture['x'].type == TOKEN.NAME:
+        # `if ret == 'success'`.
+        # We can just remove this.
+
+        if capture['returntype'] == TOKEN.NAME and capture['returntype'].value != capture['x'].value:
+            # not sure what this is doing? leave it alone.
+            return
+
+        # Trailing whitespace and any comments after the if statement are captured
+        # in the prefix for the dedent node. Copy it to the following node.
+        dedent = capture["dedent"]
+        next_node = node.next_sibling
+        node.remove()
+        next_node.prefix = dedent.prefix
+    elif capture['x'].type == syms.power:
+        # is a function call. call it, just discard the result.
+        if capture['returntype'].type == TOKEN.NAME:
+            # not sure what this is doing? leave it alone
+            return
+        func = capture['x'].clone()
+        func.prefix = node.prefix
+
+        # Trailing whitespace and any comments after the if statement are captured
+        # in the prefix for the dedent node. Copy it to the following node.
+        dedent = capture["dedent"]
+        next_node = node.next_sibling
+        node.replace([func, Newline()])
+        next_node.prefix = dedent.prefix
+    else:
+        print(capture['x'])
+        raise ValueError("unknown type")
+
+
 def remove_return_success(node, capture, filename):
     """
     return 'success'
@@ -411,7 +460,7 @@ def main():
 
     queries = [
         Query(*args.files)
-        # 1. Rename all tests `test_*`, and removes the `gdaltest_list` assignments.
+        # Rename all tests `test_*`, and removes the `gdaltest_list` assignments.
         .select(
             """
                 power<
@@ -433,7 +482,34 @@ def main():
                 ")" > >
             """
         ).modify(rename_tests)
-        # 2. Turn basic if/post_reason clauses into assertions
+        # `if x() != 'success'` --> `x()` (the 'success' return value gets removed further down)
+        .select(
+            """
+            if_stmt<
+                "if" comparison<
+                    x=any "!=" ( "'success'" | '"success"' )
+                > ":"
+                suite<
+                    any any
+                    [
+                        simple_stmt<
+                            power<
+                                "gdaltest" trailer< "." "post_reason" >
+                                trailer< "(" reason=( "'failure'" | "'fail'" ) ")" >
+                            >
+                            any
+                        >
+                    ]
+                    simple_stmt<
+                        return_stmt< "return" returntype=any >
+                        any
+                    >
+                    dedent=any
+                >
+            >
+            """
+        ).modify(callback=remove_success_expectations)
+        # Turn basic if/post_reason clauses into assertions
         .select(
             """
             if_stmt<
@@ -456,7 +532,7 @@ def main():
             >
         """
         ).modify(callback=gdaltest_fail_reason_to_assert)
-        # 3. Replace further post_reason calls and skip/fail returns
+        # Replace further post_reason calls and skip/fail returns
         .select(
             """
             [
@@ -476,7 +552,7 @@ def main():
         """
         ).modify(callback=gdaltest_skipfail_reason_to_if),
         Query(*args.files)
-        # 4. Remove all `return 'success'`, or convert ternary ones to asserts.
+        # Remove all `return 'success'`, or convert ternary ones to asserts.
         .select(
             """
             simple_stmt<
@@ -492,7 +568,7 @@ def main():
                 any
             >
             """
-        ).modify(callback=remove_return_success),
+        ).modify(callback=remove_return_success)
     ]
 
     # FIXME: running all of these as *one* query should be possible,
