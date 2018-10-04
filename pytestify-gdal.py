@@ -221,6 +221,12 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
     condition = capture["condition"]
     reason = capture["reason"]
 
+    if reason.type == TOKEN.STRING and string_value(reason) == 'fail':
+        # kind of an unhelpful message, just don't have a message.
+        reason = None
+    else:
+        reason = parenthesize_if_multiline(reason.clone())
+
     returntype = capture["returntype"].value[1:-1]
     if returntype != "fail":
         # only handle fails for now, tackle others later
@@ -228,7 +234,7 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
 
     assertion = Assert(
         [invert_condition(parenthesize_if_multiline(condition))],
-        parenthesize_if_multiline(reason.clone()),
+        reason,
         prefix=node.prefix,
     )
     if flags["debug"]:
@@ -289,7 +295,10 @@ def gdaltest_skipfail_reason_to_if(node, capture, filename):
         next_node = capture["post_reason_call"].next_sibling
         capture["post_reason_call"].remove()
         next_node.prefix = prefix
-        args = [reason]
+
+        # 'fail' is kind of an unhelpful message, just don't have a message.
+        if reason.type != TOKEN.STRING or string_value(reason) not in ('fail', 'skip'):
+            args = [reason]
 
     # Replace the return statement with a call to pytest.skip() or pytest.fail().
     # Include the reason message if there was one.
@@ -543,21 +552,23 @@ def main():
         # Replace further post_reason calls and skip/fail returns
         3: lambda q: q.select(
             """
-            [
-                post_reason_call=simple_stmt<
-                    power<
-                        "gdaltest" trailer< "." "post_reason" >
-                        trailer< "(" reason=any ")" >
+                any<
+                    any*
+                    post_reason_call=simple_stmt<
+                        power<
+                            "gdaltest" trailer< "." "post_reason" >
+                            trailer< "(" reason=any ")" >
+                        >
+                        any
                     >
-                    any
+                    any*
+                    simple_stmt<
+                        return_call=return_stmt< "return" returntype=STRING >
+                        any
+                    >
+                    any*
                 >
-                any*
-            ]
-            simple_stmt<
-                return_call=return_stmt< "return" returntype=STRING >
-                any
-            >
-        """
+            """
         ).modify(callback=gdaltest_skipfail_reason_to_if),
         # Remove all `return 'success'`, or convert ternary ones to asserts.
         4: lambda q: q.select(
