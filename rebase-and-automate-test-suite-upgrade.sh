@@ -11,11 +11,19 @@ die () {
 # The directory this script is in.
 SELF_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 
+# Error if we're not in the GDAL repo
+git show af2561ce24d1263819b18d367d0900bc6f524e34 > /dev/null  || die "Not in the GDAL repo"
+ls .git > /dev/null  || die "Not in the root dir of the GDAL repo"
+
 # Check there's no 'Automated' stuff in recent history.
 AUTOMATED_COMMITS="$(git log --oneline | head -n 20 | grep Automated || true)"
 if [ ! -z "$AUTOMATED_COMMITS" ] ; then
     die "HEAD isn't the right commit"
 fi
+
+# rebase against upstream master
+git fetch upstream
+git rebase upstream/master
 
 for STEP in 0 1 2 3 4 ; do
     MESSAGE=`cat $SELF_DIR/gdal-commit-messages.json | jq -r ".[${STEP}]"`
