@@ -445,10 +445,16 @@ def main():
     )
     parser.add_argument(
         "--debug",
-        dest="debug",
         default=False,
         action="store_true",
         help="Spit out debugging information",
+    )
+    parser.add_argument(
+        "--step",
+        default=False,
+        action="store",
+        type=int,
+        help="Which step to run",
     )
     parser.add_argument(
         "files", nargs="+", help="The python source file(s) to operate on."
@@ -458,10 +464,11 @@ def main():
     # No way to pass this to .modify() callables, so we just set it at module level
     flags["debug"] = args.debug
 
-    queries = [
-        Query(*args.files)
+    query = Query(*args.files)
+
+    steps = {
         # Rename all tests `test_*`, and removes the `gdaltest_list` assignments.
-        .select(
+        0: lambda q: q.select(
             """
                 power<
                     "gdaltest_list" trailer< "." "append" >
@@ -481,9 +488,10 @@ def main():
                     testnames=testlist_gexp
                 ")" > >
             """
-        ).modify(rename_tests)
+        ).modify(rename_tests),
+
         # `if x() != 'success'` --> `x()` (the 'success' return value gets removed further down)
-        .select(
+        1: lambda q: q.select(
             """
             if_stmt<
                 "if" comparison<
@@ -508,9 +516,9 @@ def main():
                 >
             >
             """
-        ).modify(callback=remove_success_expectations)
+        ).modify(callback=remove_success_expectations),
         # Turn basic if/post_reason clauses into assertions
-        .select(
+        2: lambda q: q.select(
             """
             if_stmt<
                 "if" condition=any ":"
@@ -531,9 +539,9 @@ def main():
                 >
             >
         """
-        ).modify(callback=gdaltest_fail_reason_to_assert)
+        ).modify(callback=gdaltest_fail_reason_to_assert),
         # Replace further post_reason calls and skip/fail returns
-        .select(
+        3: lambda q: q.select(
             """
             [
                 post_reason_call=simple_stmt<
@@ -551,9 +559,8 @@ def main():
             >
         """
         ).modify(callback=gdaltest_skipfail_reason_to_if),
-        Query(*args.files)
         # Remove all `return 'success'`, or convert ternary ones to asserts.
-        .select(
+        4: lambda q: q.select(
             """
             simple_stmt<
                 return_call=return_stmt< "return"
@@ -569,19 +576,19 @@ def main():
             >
             """
         ).modify(callback=remove_return_success)
-    ]
+    }
 
-    # FIXME: running all of these as *one* query should be possible,
-    # but causes strange `patch` conflict errors.
-    # Need to describe the issue and report to Bowler.
-    # But it works as-is, just takes a little longer.
-    for q in queries:
-        # Actually run all of the above.
-        q.execute(
-            # interactive diff implies write (for the bits the user says 'y' to)
-            interactive=(args.interactive and args.write),
-            write=args.write,
-        )
+    if args.step:
+        query = steps[args.step](query)
+    else:
+        for i in sorted(steps.keys()):
+            query = steps[i](query)
+
+    query.execute(
+        # interactive diff implies write (for the bits the user says 'y' to)
+        interactive=(args.interactive and args.write),
+        write=args.write,
+    )
 
 
 if __name__ == "__main__":
