@@ -25,7 +25,7 @@ for STEP in 0 1 2 3 4 ; do
     $SELF_DIR/pytestify-gdal.py --no-input --step $STEP --silent autotest
     
     REJ_FILES="$(find autotest -name '*.rej' -print -delete)"
-    while [ ! -z $REJ_FILES ] ; do
+    while [ ! -z "$REJ_FILES" ] ; do
         PY_FILES=" "
         for REJ in "$REJ_FILES" ; do
             PY_FILES="$PY_FILES ${REJ%.*}"
