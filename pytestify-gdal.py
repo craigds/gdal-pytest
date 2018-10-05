@@ -201,15 +201,9 @@ def rename_tests(node, capture, filename):
     if flags["debug"]:
         print(f"renaming {filename} tests: {capture!r}")
 
-    if capture.get("testname"):
-        # one test
-        tok = capture["testname"]
-        _rename_test(tok, filename)
-    else:
-        # multiple tests in a list
-        for tok in list(capture["testnames"].children):
-            if tok.type == TOKEN.NAME:
-                _rename_test(tok, filename)
+    for tok in list(capture["testnames"].children):
+        if tok.type == TOKEN.NAME:
+            _rename_test(tok, filename)
 
 
 def gdaltest_fail_reason_to_assert(node, capture, filename):
@@ -443,6 +437,13 @@ def remove_return_success(node, capture, filename):
                 remove_node_and_fix_empty_functions(node)
 
 
+def remove_test_lists(node, capture, filename):
+    """
+    Removes the `gdaltest_list` from modules.
+    """
+    node.remove()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Converts GDAL's test assertions to be pytest-style where possible."
@@ -494,23 +495,9 @@ def main():
         # Rename all tests `test_*`, and removes the `gdaltest_list` assignments.
         0: lambda q: q.select(
             """
-                power<
-                    "gdaltest_list" trailer< "." "append" >
-                    trailer< "(" testname=NAME ")" >
-                >
-            |
-                power<
-                    "gdaltest_list" trailer< "." "insert" >
-                    trailer< "(" any "," testname=NAME ")" >
-                >
-            |
-                expr_stmt< "gdaltest_list" "=" atom< "["
-                    testnames=listmaker
-                "]" > >
-            |
-                expr_stmt< "gdaltest_list" "=" atom< "("
-                    testnames=testlist_gexp
-                ")" > >
+            expr_stmt< "gdaltest_list" "=" atom< "["
+                testnames=listmaker
+            "]" > >
             """
         ).modify(rename_tests),
 
@@ -605,7 +592,18 @@ def main():
                 any
             >
             """
-        ).modify(callback=remove_return_success)
+        ).modify(callback=remove_return_success),
+        # Remove gdaltest_list from each test module
+        5: lambda q: q.select(
+            """
+            simple_stmt<
+                expr_stmt< "gdaltest_list" "=" atom< "["
+                    testnames=listmaker
+                "]" > >
+                any
+            >
+            """
+        ).modify(remove_test_lists),
     }
 
     if args.step is not None:
