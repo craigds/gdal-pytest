@@ -44,6 +44,7 @@ for STEP in 0 1 2 3 4 ; do
         REJ_FILES="$(find autotest -name '*.rej' -print -delete)"
     done
     find autotest -name '*.orig' -delete
+    python -m compileall autotest | (grep Sorry || true)  || die 'compile errors!'
     git add autotest
     git commit -m "$MESSAGE"
 done
