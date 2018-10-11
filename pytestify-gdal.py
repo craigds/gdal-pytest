@@ -444,6 +444,13 @@ def remove_test_lists(node, capture, filename):
     node.remove()
 
 
+def remove_main_block(node, capture, filename):
+    """
+    Removes the `__main__` block from modules.
+    """
+    node.remove()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Converts GDAL's test assertions to be pytest-style where possible."
@@ -604,6 +611,16 @@ def main():
             >
             """
         ).modify(remove_test_lists),
+        # Remove the __main__ block from each test module
+        6: lambda q: q.select(
+            """
+            if_stmt<
+                "if"
+                comparison< "__name__" "==" "'__main__'" >
+                any*
+            >
+            """
+        ).modify(remove_main_block),
     }
 
     if args.step is not None:
