@@ -36,7 +36,7 @@ for STEP in 0 1 2 3 4 5 6 ; do
     REJ_FILES="$(find autotest -name '*.rej' -print -delete)"
     while [ ! -z "$REJ_FILES" ] ; do
         PY_FILES=" "
-        for REJ in "$REJ_FILES" ; do
+        for REJ in $REJ_FILES ; do
             PY_FILES="$PY_FILES ${REJ%.*}"
         done
         echo "patch created reject files, trying again with:"
