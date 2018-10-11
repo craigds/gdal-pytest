@@ -21,9 +21,10 @@ if [ ! -z "$AUTOMATED_COMMITS" ] ; then
     die "HEAD isn't the right commit"
 fi
 
+# nope.
 # rebase against upstream master
-git fetch upstream
-git rebase upstream/master
+# git fetch upstream
+# git rebase upstream/master
 
 for STEP in 0 1 2 3 4 5 6 ; do
     MESSAGE=`cat $SELF_DIR/gdal-commit-messages.json | jq -r ".[${STEP}]"`
