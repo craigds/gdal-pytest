@@ -520,7 +520,11 @@ def main():
                     [
                         simple_stmt<
                             power<
-                                "gdaltest" trailer< "." "post_reason" >
+                                (
+                                    "gdaltest" trailer< "." "post_reason" >
+                                |
+                                    "post_reason"
+                                )
                                 trailer< "(" reason=( "'failure'" | "'fail'" ) ")" >
                             >
                             any
@@ -545,7 +549,11 @@ def main():
                     [
                         simple_stmt<
                             power<
-                                "gdaltest" trailer< "." "post_reason" >
+                                (
+                                    "gdaltest" trailer< "." "post_reason" >
+                                |
+                                    "post_reason"
+                                )
                                 trailer< "(" reason=any ")" >
                             >
                             any
@@ -568,7 +576,11 @@ def main():
                     [
                         post_reason_call=simple_stmt<
                             power<
-                                "gdaltest" trailer< "." "post_reason" >
+                                (
+                                    "gdaltest" trailer< "." "post_reason" >
+                                |
+                                    "post_reason"
+                                )
                                 trailer< "(" reason=any ")" >
                             >
                             any
