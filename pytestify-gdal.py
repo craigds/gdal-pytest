@@ -14,6 +14,10 @@ from fissix.fixer_util import (
     find_root,
     find_binding,
     touch_import,
+    Dot,
+    LParen,
+    RParen,
+    KeywordArg,
 )
 from fissix.pygram import python_symbols as syms
 
@@ -176,7 +180,11 @@ def _rename_test(node, filename):
         for n in root.leaves():
             if n.type == TOKEN.NAME and n.value == old_name:
                 # Don't include dotted names
-                if n.parent.type == syms.trailer and n.prev_sibling and n.prev_sibling.value == '.':
+                if (
+                    n.parent.type == syms.trailer
+                    and n.prev_sibling
+                    and n.prev_sibling.value == '.'
+                ):
                     continue
 
                 # This is probably a reference to the test function
@@ -350,7 +358,10 @@ def remove_success_expectations(node, capture, filename):
         # `if ret == 'success'`.
         # We can just remove this.
 
-        if capture['returntype'] == TOKEN.NAME and capture['returntype'].value != capture['x'].value:
+        if (
+            capture['returntype'] == TOKEN.NAME
+            and capture['returntype'].value != capture['x'].value
+        ):
             # not sure what this is doing? leave it alone.
             return
 
@@ -451,6 +462,76 @@ def remove_main_block(node, capture, filename):
     node.remove()
 
 
+def make_pytest_raises_blocks(node, capture, filename):
+    """
+    Turns this:
+
+        try:
+            ...
+            pytest.fail(...)
+        except:
+            pass
+
+    Into:
+        with pytest.raises(Exception):
+            ...
+
+    Not only is this prettier, but the former is a bug since
+    pytest.fail() raises an exception.
+    """
+
+    exc_class = capture.get('exc_class', None)
+
+    if exc_class:
+        exc_class = exc_class.clone()
+        exc_class.prefix = ''
+        raises_args = [exc_class]
+    else:
+        raises_args = [kw('Exception', prefix='')]
+
+    reason = capture.get('reason')
+    if reason:
+        assert len(reason) == 1
+        reason = KeywordArg(kw('message'), reason[0].clone())
+        raises_args = [Node(syms.arglist, raises_args + [Comma(), reason])]
+
+    raises_args = [LParen()] + raises_args + [RParen()]
+
+    capture['fail_stmt'].remove()
+
+    try_suite = capture['try_suite'].clone()
+
+    with_stmt = Node(
+        syms.with_stmt,
+        [
+            kw('with', prefix=''),
+            Node(
+                syms.power,
+                [
+                    kw('pytest'),
+                    Node(syms.trailer, [Dot(), kw('raises', prefix='')]),
+                    Node(syms.trailer, raises_args),
+                ],
+            ),
+            Leaf(TOKEN.COLON, ':'),
+            try_suite,
+        ],
+        prefix=node.prefix,
+    )
+
+    # Trailing whitespace and any comments after the if statement are captured
+    # in the prefix for the dedent node. Copy it to the following node.
+    dedent = capture["dedent"]
+    next_node = node.next_sibling
+
+    # This extra newline avoids syntax errors in some cases (where the try
+    # statement is at the end of another suite)
+    # I don't really know why those occur.
+    # Should clean this stuff up with `black` later.
+    node.replace([with_stmt, Newline()])
+    next_node.prefix = dedent.prefix
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Converts GDAL's test assertions to be pytest-style where possible."
@@ -482,11 +563,7 @@ def main():
         help="Don't spit out a diff, just write changes to files",
     )
     parser.add_argument(
-        "--step",
-        default=False,
-        action="store",
-        type=int,
-        help="Which step to run",
+        "--step", default=False, action="store", type=int, help="Which step to run"
     )
     parser.add_argument(
         "files", nargs="+", help="The python source file(s) to operate on."
@@ -507,7 +584,6 @@ def main():
             "]" > >
             """
         ).modify(rename_tests),
-
         # `if x() != 'success'` --> `x()` (the 'success' return value gets removed further down)
         1: lambda q: q.select(
             """
@@ -633,6 +709,38 @@ def main():
             >
             """
         ).modify(remove_main_block),
+        # Find pytest.fail() inside `try` blocks
+        # where the 'except' bit is just "pass",
+        # and turn them into `with pytest.raises(...)` blocks
+        7: lambda q: q.select(
+            """
+            try_stmt<
+                "try" ":"
+                try_suite=suite<
+                    any any
+                    any*
+                    fail_stmt=simple_stmt<
+                        power<
+                            "pytest"
+                            trailer< "." "fail" >
+                            trailer< "(" reason=any* ")" >
+                        >
+                        any
+                    >
+                    any
+                >
+                ("except" | except_clause< "except" exc_class=NAME any* > ) ":"
+                suite<
+                    any any
+                    simple_stmt<
+                        "pass"
+                        any
+                    >
+                    dedent=any
+                >
+            >
+            """
+        ).modify(make_pytest_raises_blocks),
     }
 
     if args.step is not None:

@@ -5,5 +5,6 @@
     "Automated: Rewrite most skip/fail from tests\n\nRather than returning a string from tests, we can just call `pytest.skip()`\nor `pytest.fail()`. This throws an exception, which is transparently handled\nby the pytest runner and provides contextual information.\n",
     "Automated: Don't return 'success' from tests\n\nTests that exit without raising any exceptions are considered to\nhave passed.\n",
     "Automated: Remove gdaltest_list\n\nNo longer needed\n",
-    "Automated: Remove __main__ block from tests\n\nNo longer needed\n"
+    "Automated: Remove __main__ block from tests\n\nNo longer needed\n",
+    "Automated: Use pytest.raises() where necessary\n\npytest.fail() raises an exception, which means it doesn't work as\nexpected in a catchall try/except block.\nPytest provides a pytest.raises() contextmanager which does this better.\n"
 ]

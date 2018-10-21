@@ -26,7 +26,7 @@ fi
 # git fetch upstream
 # git rebase upstream/master
 
-for STEP in 0 1 2 3 4 5 6 ; do
+for STEP in 0 1 2 3 4 5 6 7 ; do
     MESSAGE=`cat $SELF_DIR/gdal-commit-messages.json | jq -r ".[${STEP}]"`
     echo
     echo "applying step ${STEP}: ${MESSAGE}" | head -n 1
@@ -48,6 +48,10 @@ for STEP in 0 1 2 3 4 5 6 ; do
     python -m compileall autotest | (grep Sorry || true)  || die 'compile errors!'
     git add autotest
     git commit -m "$MESSAGE"
+done
+
+for COMMIT in dbb57a13ba9781990aa760a13bdc2d6cbcc1fcec ; do
+    git cherry-pick $COMMIT
 done
 
 echo success
