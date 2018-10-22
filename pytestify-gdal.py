@@ -4,6 +4,7 @@ Converts GDAL's test suite to use pytest style assertions.
 """
 
 import argparse
+import re
 
 from fissix.fixer_util import (
     Comma,
@@ -77,17 +78,20 @@ def is_multiline(node):
 
 
 def parenthesize_if_not_already(node):
-    if node.type == syms.power:
-        # don't have to parenthesize, it's a function call
+    if isinstance(node, Leaf) or node.type == syms.power:
+        # don't have to parenthesize, it's a simple leaf node, or a function call
         return node
     for first_leaf in node.leaves():
         if first_leaf.type in (TOKEN.LPAR, TOKEN.LBRACE, TOKEN.LSQB):
             # Already parenthesized
             return node
         break
+    orig_prefix = node.prefix
     node = node.clone()
     node.prefix = ''
-    return parenthesize(node)
+    ret = parenthesize(node)
+    ret.prefix = orig_prefix
+    return ret
 
 
 def parenthesize_if_multiline(node):
@@ -140,7 +144,9 @@ def invert_condition(condition):
         # `not x` --> just remove the `not`
         return condition.children[1].clone()
     else:
-        return Node(syms.not_test, [kw("not"), parenthesize(condition.clone())])
+        return Node(
+            syms.not_test, [kw("not"), parenthesize_if_not_already(condition.clone())]
+        )
 
 
 def get_ancestor_of_type(node, typ):
@@ -232,7 +238,9 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
     reason = capture.get("reason")
 
     if reason:
-        if reason.type == TOKEN.STRING and string_value(reason) == 'fail':
+        if reason.type == TOKEN.STRING and re.match(
+            r'(?i)fail(ure|ed)?', string_value(reason).strip().lower()
+        ):
             # kind of an unhelpful message, just don't have a message.
             reason = None
         else:
