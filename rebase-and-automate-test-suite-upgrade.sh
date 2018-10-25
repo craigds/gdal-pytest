@@ -26,7 +26,7 @@ fi
 # git fetch upstream
 # git rebase upstream/master
 
-for STEP in 0 1 2 3 4 5 6 7 ; do
+for STEP in 0 1 2 3 4 5 6 7 8 ; do
     MESSAGE=`cat $SELF_DIR/gdal-commit-messages.json | jq -r ".[${STEP}]"`
     echo
     echo "applying step ${STEP}: ${MESSAGE}" | head -n 1
@@ -50,7 +50,7 @@ for STEP in 0 1 2 3 4 5 6 7 ; do
     git commit -m "$MESSAGE"
 done
 
-for COMMIT in 4a3ff300c0d03c7e8a81a499ccfbeeecfcc638cb ; do
+for COMMIT in ca9fab100a004d7750d527ed8dbbb9e4636e6542 ; do
     git cherry-pick $COMMIT
 done
 

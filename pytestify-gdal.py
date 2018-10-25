@@ -220,6 +220,15 @@ def rename_tests(node, capture, filename):
             _rename_test(tok, filename)
 
 
+def remove_useless_post_reason_calls(node, capture, filename):
+    reason = string_value(capture['reason']).strip().lower()
+    if reason in ('skip', 'skipped', 'fail', 'failure', 'failed'):
+        # kind of an unhelpful message, just don't have a message.
+        next_node = node.next_sibling
+        node.remove()
+        next_node.prefix = node.prefix
+
+
 def gdaltest_fail_reason_to_assert(node, capture, filename):
     """
     Converts an entire if statement into an assertion.
@@ -238,13 +247,7 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
     reason = capture.get("reason")
 
     if reason:
-        if reason.type == TOKEN.STRING and re.match(
-            r'(?i)fail(ure|ed)?', string_value(reason).strip().lower()
-        ):
-            # kind of an unhelpful message, just don't have a message.
-            reason = None
-        else:
-            reason = parenthesize_if_multiline(reason.clone())
+        reason = parenthesize_if_multiline(reason.clone())
 
     returntype = capture["returntype"].value[1:-1]
     if returntype != "fail":
@@ -315,9 +318,7 @@ def gdaltest_skipfail_reason_to_if(node, capture, filename):
         capture["post_reason_call"].remove()
         next_node.prefix = prefix
 
-        # 'fail' is kind of an unhelpful message, just don't have a message.
-        if reason.type != TOKEN.STRING or string_value(reason) not in ('fail', 'skip'):
-            args = [reason]
+        args = [reason]
 
     # Replace the return statement with a call to pytest.skip() or pytest.fail().
     # Include the reason message if there was one.
@@ -623,14 +624,30 @@ def main():
             >
             """
         ).modify(callback=remove_success_expectations),
-        # Turn basic if/post_reason clauses into assertions
+        # Remove useless `post_reason('fail')` calls
         2: lambda q: q.select(
             """
-            if_stmt<
-                "if" condition=any ":"
-                suite<
-                    any any
-                    [
+            simple_stmt<
+                power<
+                    (
+                        "gdaltest" trailer< "." "post_reason" >
+                    |
+                        "post_reason"
+                    )
+                    trailer< "(" reason=STRING ")" >
+                >
+                any
+            >
+        """
+        ).modify(callback=remove_useless_post_reason_calls),
+        # Turn basic if/post_reason clauses into assertions
+        3: lambda q: (
+            q.select(
+                """
+                if_stmt<
+                    "if" condition=any ":"
+                    suite<
+                        any any
                         simple_stmt<
                             power<
                                 (
@@ -642,22 +659,54 @@ def main():
                             >
                             any
                         >
-                    ]
-                    simple_stmt<
-                        return_stmt< "return" returntype=STRING >
-                        any
+                        return_stmt=simple_stmt<
+                            return_stmt< "return" returntype=STRING >
+                            any
+                        >
+                        dedent=any
                     >
-                    dedent=any
                 >
-            >
-        """
-        ).modify(callback=gdaltest_fail_reason_to_assert),
-        # Replace further post_reason calls and skip/fail returns
-        3: lambda q: q.select(
             """
-                any<
-                    any*
-                    [
+            )
+            .modify(callback=gdaltest_fail_reason_to_assert)
+            # (still part of step 3)
+            # same as above, but get the reason from `print(reason)`
+            # if we didn't find a post_reason clause.
+            # (and, now, the reason is optional)
+            .select(
+                """
+                if_stmt<
+                    "if" condition=any ":"
+                    suite<
+                        any any
+                        [
+                            simple_stmt<
+                                power<
+                                    (
+                                        "print"
+                                    )
+                                    trailer< "(" reason=any ")" >
+                                >
+                                any
+                            >
+                        ]
+                        return_stmt=simple_stmt<
+                            return_stmt< "return" returntype=STRING >
+                            any
+                        >
+                        dedent=any
+                    >
+                >
+            """
+            )
+            .modify(callback=gdaltest_fail_reason_to_assert)
+        ),
+        # Replace further post_reason calls and skip/fail returns
+        4: lambda q: (
+            q.select(
+                """
+                    any<
+                        any*
                         post_reason_call=simple_stmt<
                             power<
                                 (
@@ -670,17 +719,47 @@ def main():
                             any
                         >
                         any*
-                    ]
-                    simple_stmt<
-                        return_call=return_stmt< "return" returntype=STRING >
-                        any
+                        return_stmt=simple_stmt<
+                            return_call=return_stmt< "return" returntype=STRING >
+                            any
+                        >
+                        any*
                     >
-                    any*
-                >
-            """
-        ).modify(callback=gdaltest_skipfail_reason_to_if),
+                """
+            )
+            .modify(callback=gdaltest_skipfail_reason_to_if)
+            # (still part of step 4)
+            # same as above, but get the reason from `print(reason)`
+            # if we didn't find a post_reason clause.
+            # (and, now, the reason is optional)
+            .select(
+                """
+                    any<
+                        any*
+                        [
+                            post_reason_call=simple_stmt<
+                                power<
+                                    (
+                                        "print"
+                                    )
+                                    trailer< "(" reason=any ")" >
+                                >
+                                any
+                            >
+                            any*
+                        ]
+                        return_stmt=simple_stmt<
+                            return_call=return_stmt< "return" returntype=STRING >
+                            any
+                        >
+                        any*
+                    >
+                """
+            )
+            .modify(callback=gdaltest_skipfail_reason_to_if)
+        ),
         # Remove all `return 'success'`, or convert ternary ones to asserts.
-        4: lambda q: q.select(
+        5: lambda q: q.select(
             """
             simple_stmt<
                 return_call=return_stmt< "return"
@@ -697,7 +776,7 @@ def main():
             """
         ).modify(callback=remove_return_success),
         # Remove gdaltest_list from each test module
-        5: lambda q: q.select(
+        6: lambda q: q.select(
             """
             simple_stmt<
                 expr_stmt< "gdaltest_list" "=" atom< "["
@@ -708,7 +787,7 @@ def main():
             """
         ).modify(remove_test_lists),
         # Remove the __main__ block from each test module
-        6: lambda q: q.select(
+        7: lambda q: q.select(
             """
             if_stmt<
                 "if"
@@ -720,7 +799,7 @@ def main():
         # Find pytest.fail() inside `try` blocks
         # where the 'except' bit is just "pass",
         # and turn them into `with pytest.raises(...)` blocks
-        7: lambda q: q.select(
+        8: lambda q: q.select(
             """
             try_stmt<
                 "try" ":"
