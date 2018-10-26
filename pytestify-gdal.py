@@ -4,7 +4,6 @@ Converts GDAL's test suite to use pytest style assertions.
 """
 
 import argparse
-import re
 
 from fissix.fixer_util import (
     Comma,
@@ -229,6 +228,14 @@ def remove_useless_post_reason_calls(node, capture, filename):
         next_node.prefix = node.prefix
 
 
+def _str_node(node):
+    if isinstance(node, Leaf):
+        # don't include prefix
+        return str(node.value)
+    else:
+        return str(node)
+
+
 def gdaltest_fail_reason_to_assert(node, capture, filename):
     """
     Converts an entire if statement into an assertion.
@@ -245,6 +252,16 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
 
     condition = capture["condition"]
     reason = capture.get("reason")
+
+    if reason:
+        # Don't include reasons that are actually expressions used in the comparison itself.
+        # These are already printed by pytest in the event of the assertion failing
+        reason_str = _str_node(reason)
+        for n in condition.pre_order():
+            n_str = _str_node(n)
+            if n.type == reason.type and n_str == reason_str:
+                reason = None
+                break
 
     if reason:
         reason = parenthesize_if_not_already(reason.clone())
