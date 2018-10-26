@@ -76,6 +76,18 @@ def is_multiline(node):
     return False
 
 
+def _parenthesize(node):
+    """
+    Same as the fissix one but doesn't do stupid things with whitespace
+    """
+    orig_prefix = node.prefix
+    node = node.clone()
+    node.prefix = ''
+    ret = parenthesize(node)
+    ret.prefix = orig_prefix
+    return ret
+
+
 def parenthesize_if_not_already(node):
     if isinstance(node, Leaf) or node.type == syms.power:
         # don't have to parenthesize, it's a simple leaf node, or a function call
@@ -85,12 +97,7 @@ def parenthesize_if_not_already(node):
             # Already parenthesized
             return node
         break
-    orig_prefix = node.prefix
-    node = node.clone()
-    node.prefix = ''
-    ret = parenthesize(node)
-    ret.prefix = orig_prefix
-    return ret
+    return _parenthesize(node)
 
 
 def parenthesize_if_multiline(node):
@@ -99,7 +106,20 @@ def parenthesize_if_multiline(node):
     return node
 
 
-def invert_condition(condition):
+def _num_negations(node):
+    return len(
+        [
+            1
+            for leaf in node.leaves()
+            if (
+                (leaf.type == TOKEN.NOTEQUAL)
+                or (leaf.type == TOKEN.NAME and leaf.value == 'not')
+            )
+        ]
+    )
+
+
+def invert_condition(condition, nested=False):
     """
     Inverts a boolean expression, e.g.:
         a == b
@@ -113,6 +133,12 @@ def invert_condition(condition):
 
         (a or b)
         --> not (a or b)
+
+        (a and b)
+        --> not (a and b)
+
+        (a == b and c != d)
+        --> (a != b or c == d)
 
         a if b else c
         --> not (a if b else c)
@@ -142,6 +168,40 @@ def invert_condition(condition):
     elif condition.type == syms.not_test:
         # `not x` --> just remove the `not`
         return condition.children[1].clone()
+    elif condition.type in (syms.and_test, syms.or_test):
+        # Tricky one.
+        # (a != b and c != d)
+        # which should this become?
+        #    --> (a == b or c == d)
+        #    --> not (a != b and c != d)
+        # Seems somewhat context dependent. Basically we compute both, and then
+        # decide based on which has the least negations.
+
+        simply_inverted = Node(
+            syms.not_test, [kw("not"), parenthesize_if_not_already(condition.clone())]
+        )
+        if condition.type == syms.and_test:
+            children = [invert_condition(condition.children[0], nested=True)]
+            for child in condition.children[2::2]:
+                children.extend([kw('or'), invert_condition(child, nested=True)])
+
+            complex_inverted = Node(syms.or_test, children)
+            if nested:
+                # We're inside an outer 'and' test, and 'or' has lower precedence.
+                # so we need to parenthesize to ensure the expression is correct
+                complex_inverted = _parenthesize(complex_inverted)
+        else:
+            children = [invert_condition(condition.children[0], nested=True)]
+            for child in condition.children[2::2]:
+                children.extend([kw('and'), invert_condition(child, nested=True)])
+
+            complex_inverted = Node(syms.and_test, children)
+
+        return min([simply_inverted, complex_inverted], key=_num_negations)
+        if len(str(simply_inverted)) < len(str(complex_inverted)):
+            return simply_inverted
+        else:
+            return complex_inverted
     else:
         return Node(
             syms.not_test, [kw("not"), parenthesize_if_not_already(condition.clone())]
