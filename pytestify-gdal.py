@@ -247,7 +247,7 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
     reason = capture.get("reason")
 
     if reason:
-        reason = parenthesize_if_multiline(reason.clone())
+        reason = parenthesize_if_not_already(reason.clone())
 
     returntype = capture["returntype"].value[1:-1]
     if returntype != "fail":
