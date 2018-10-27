@@ -50,7 +50,7 @@ for STEP in 0 1 2 3 4 5 6 7 8 ; do
     git commit -m "$MESSAGE"
 done
 
-for COMMIT in ca9fab100a004d7750d527ed8dbbb9e4636e6542 ; do
+for COMMIT in 0fc98fe984a8b977be2991242dbd9db34cae38a9 ; do
     git cherry-pick $COMMIT
 done
 
