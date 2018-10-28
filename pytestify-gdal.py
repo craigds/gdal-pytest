@@ -19,6 +19,7 @@ from fissix.fixer_util import (
     LParen,
     RParen,
     KeywordArg,
+    find_indentation,
 )
 from fissix.pygram import python_symbols as syms
 
@@ -26,6 +27,9 @@ from bowler import Query, TOKEN
 from bowler.types import Leaf, Node
 
 flags = {}
+
+
+LONG_LINE = 88  # chars
 
 
 def kw(name, **kwargs):
@@ -65,6 +69,29 @@ def Assert(test, message=None, **kwargs):
         [Leaf(TOKEN.NAME, "assert")] + test + (message or []),
         **kwargs,
     )
+
+
+def replace_if_with_assert(if_node, dedent_node, assert_node):
+    # Trailing whitespace and any comments after the if statement are captured
+    # in the prefix for the dedent node. Copy it to the following node.
+    next_node = if_node.next_sibling
+    if_node.replace([assert_node, Newline()])
+    next_node.prefix = dedent_node.prefix
+
+    message_nodes = assert_node.children[3:]
+
+    if message_nodes:
+        # If one line, and it's longer than LONG_LINE, make a basic attempt to split before the message
+        lines = str(assert_node).splitlines()
+        original_num_long_lines = sum(1 for line in lines if len(line) > LONG_LINE)
+
+        if original_num_long_lines:
+            # First, clone the original.
+            assert_node, split_assert = assert_node.clone(), assert_node
+
+            # now insert a newline after the comma
+            reason_node = message_nodes[0]
+            reason_node.prefix = f" \\\n{find_indentation(split_assert)}    {reason_node.prefix.lstrip(' ')}"
 
 
 def is_multiline(node):
@@ -275,9 +302,17 @@ def rename_tests(node, capture, filename):
     if flags["debug"]:
         print(f"renaming {filename} tests: {capture!r}")
 
-    for tok in list(capture["testnames"].children):
-        if tok.type == TOKEN.NAME:
-            _rename_test(tok, filename)
+    testnames = capture["testnames"]
+    if not isinstance(testnames, list):
+        testnames = [testnames]
+    for testnames_node in testnames:
+        if testnames_node.type == TOKEN.NAME:
+            # just one test in the list
+            _rename_test(testnames_node, filename)
+        else:
+            for tok in list(testnames_node.children):
+                if tok.type == TOKEN.NAME:
+                    _rename_test(tok, filename)
 
 
 def remove_useless_post_reason_calls(node, capture, filename):
@@ -298,6 +333,16 @@ def listify(captured):
         return [captured]
 
 
+def safe_remove_from_suite(stmt):
+    prev = stmt.prev_sibling
+    nek = stmt.next_sibling
+    stmt.remove()
+    if prev.type == TOKEN.INDENT:
+        # weird case where indentation gets doubled when you remove the first
+        # statement in a suite.
+        nek.prefix = nek.prefix.lstrip()
+
+
 def gdaltest_fail_reason_to_assert(node, capture, filename):
     """
     Converts an entire if statement into an assertion.
@@ -316,7 +361,12 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
     Ignores reasons that are sub-expressions of the condition
     (ie, will ignore `x` as a reason in the above example.)
 
-    Strips all the print/post_reason calls, even if they're not used as reasons.
+    Attempts to strip out low-value print/post_reason calls.
+    If they can't all be stripped out, falls back to using an if statement with pytest.fail():
+
+        if x == y:
+            print("a", a)
+            pytest.fail("b")
     """
     if flags["debug"]:
         print(f"expression: {capture}")
@@ -331,23 +381,36 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
         n.value for n in condition.leaves() if n.type in (TOKEN.NAME, TOKEN.STRING)
     }
 
+    candidates = []
     # Find a reason. Prefer post_reason reasons rather than print statements.
-    candidates = listify(capture.get('printed_reason')) + listify(
-        capture.get('posted_reason')
-    )
+    for stmt in capture['reason_candidates']:
+        power = stmt.children[0]
+        if power.children[0].value == 'print':
+            candidates.append(power.children[1].children[1])
+
+    for stmt in capture['reason_candidates']:
+        power = stmt.children[0]
+        if power.children[0].value == 'gdaltest':
+            candidates.append(power.children[2].children[1])
+        elif power.children[0].value == 'post_reason':
+            candidates.append(power.children[1].children[1])
+
+    candidates.reverse()
 
     IGNORE_REASON_STRING = re.compile(
         r'(got %.* expected .*)|(.* returned %.* instead of.*)', re.I
     )
     reason = None
-    for candidate in candidates:
+    for i, candidate in reversed(list(enumerate(candidates[:]))):
         # Don't include reasons that are actually expressions used in the comparison itself.
         # These are already printed by pytest in the event of the assertion failing
         candidate_leaves = {
             n.value for n in candidate.leaves() if n.type in (TOKEN.NAME, TOKEN.STRING)
         }
         if candidate_leaves.issubset(condition_leaves):
-            # Reason is just made up of expressions already used in the comparison; skip it
+            # Reason is just made up of expressions already used in the comparison; remove it
+            safe_remove_from_suite(candidate.parent.parent.parent)
+            candidates.pop(i)
             continue
 
         if any(
@@ -355,29 +418,46 @@ def gdaltest_fail_reason_to_assert(node, capture, filename):
             for leaf in candidate.leaves()
         ):
             # looks kind of useless too; pytest will output the got/expected values.
+            safe_remove_from_suite(candidate.parent.parent.parent)
+            candidates.pop(i)
             continue
         # Keep this reason.
         reason = candidate
 
     if reason:
-        reason = parenthesize_if_not_already(reason.clone())
+        # remove the winning reason node from the tree
+        safe_remove_from_suite(reason.parent.parent.parent)
+        reason.remove()
+        candidates.remove(reason)
 
-    assertion = Assert(
-        [parenthesize_if_multiline(invert_condition(condition))],
-        reason,
-        prefix=node.prefix,
-    )
-    if flags["debug"]:
-        print(f"Replacing:\n\t{node}")
-        print(f"With: {assertion}")
-        print()
+    if not candidates:
+        # all print/post_reason calls were removed.
+        # So we can convert the if statement to an assert.
+        if reason:
+            reason = parenthesize_if_not_already(reason.clone())
+        assertion = Assert(
+            [parenthesize_if_multiline(invert_condition(condition))],
+            reason,
+            prefix=node.prefix,
+        )
+        if flags["debug"]:
+            print(f"Replacing:\n\t{node}")
+            print(f"With: {assertion}")
+            print()
 
-    # Trailing whitespace and any comments after the if statement are captured
-    # in the prefix for the dedent node. Copy it to the following node.
-    dedent = capture["dedent"]
-    next_node = node.next_sibling
-    node.replace([assertion, Newline()])
-    next_node.prefix = dedent.prefix
+        replace_if_with_assert(node, capture['dedent'], assertion)
+    else:
+        # At least one print statement remains.
+        # We need to keep the if statement, and use a `pytest.fail(reason)`.
+        replacement = Attr(
+            kw("pytest", prefix=capture["return_call"].prefix),
+            kw(returntype, prefix=""),
+        ) + [ArgList(listify(reason))]
+
+        # Adds a 'import pytest' if there wasn't one already
+        touch_import(None, "pytest", node)
+
+        capture["return_call"].replace(replacement)
 
 
 def gdaltest_other_skipfails(node, capture, filename):
@@ -417,7 +497,7 @@ def gdaltest_other_skipfails(node, capture, filename):
     if returntype not in ("skip", "fail"):
         return
 
-    args = []
+    reason = None
     if capture.get('post_reason_call'):
         # Remove the gdal.post_reason() statement altogether. Preserve whitespace
         reason = capture["reason"].clone()
@@ -426,13 +506,11 @@ def gdaltest_other_skipfails(node, capture, filename):
         capture["post_reason_call"].remove()
         next_node.prefix = prefix
 
-        args = [reason]
-
     # Replace the return statement with a call to pytest.skip() or pytest.fail().
     # Include the reason message if there was one.
     replacement = Attr(
         kw("pytest", prefix=capture["return_call"].prefix), kw(returntype, prefix="")
-    ) + [ArgList(args)]
+    ) + [ArgList(listify(reason))]
 
     # Adds a 'import pytest' if there wasn't one already
     touch_import(None, "pytest", node)
@@ -697,7 +775,7 @@ def main():
         0: lambda q: q.select(
             """
             expr_stmt< "gdaltest_list" "=" atom< "["
-                testnames=listmaker
+                testnames=( listmaker | NAME )
             "]" > >
             """
         ).modify(rename_tests),
@@ -755,8 +833,8 @@ def main():
                 "if" condition=any ":"
                 suite<
                     any any
-                    (
-                        post_reason_or_print=simple_stmt<
+                    reason_candidates=(
+                        simple_stmt<
                             (
                                 power<
                                     (
@@ -764,19 +842,19 @@ def main():
                                     |
                                         "post_reason"
                                     )
-                                    trailer< "(" posted_reason=( any ) ")" >
+                                    trailer
                                 >
                             |
                                 power<
                                     "print"
-                                    trailer< "(" printed_reason=( any ) ")" >
+                                    trailer
                                 >
                             )
                             any
                         >
                     )*
-                    return_stmt=simple_stmt<
-                        return_stmt< "return" returntype=STRING >
+                    simple_stmt<
+                        return_call=return_stmt< "return" returntype=STRING >
                         any
                     >
                     dedent=any
