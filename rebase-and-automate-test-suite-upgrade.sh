@@ -50,8 +50,30 @@ for STEP in 0 1 2 3 4 5 6 7 8 ; do
     git commit -m "$MESSAGE"
 done
 
-for COMMIT in fd2ea8075db377921a428a1b449625dff436baa5 ; do
+
+# final step - cleanup a little using autoflake (remove unused vars/imports)
+AUTOFLAKE="autoflake --in-place --remove-unused-variables --imports 'gdaltest,ogrtest,pytest'"
+find autotest/ -name '*.py' \
+    | xargs $AUTOFLAKE
+python -m compileall autotest | (grep Sorry || true)  || die 'compile errors!'
+git add autotest
+git commit -m 'Automated: Some autoflake cleanup
+
+Remove unused vars/imports, using:
+```'"
+$AUTOFLAKE
+"'```
+'
+
+echo 'Going to cherry-pick some followup commits:'
+export NUM=4
+git log -n$NUM --oneline --reverse --color=always pytestify-manual | cat
+
+for COMMIT in $(git log -n$NUM --format='%H' --reverse pytestify-manual) ; do
     git cherry-pick $COMMIT
 done
+
+# overwrite the tag so the next time we get the right cherry picks
+git tag -f pytestify-manual
 
 echo success
