@@ -66,7 +66,7 @@ $AUTOFLAKE
 '
 
 echo 'Going to cherry-pick some followup commits:'
-export NUM=11
+export NUM=17
 git log -n$NUM --oneline --reverse --color=always pytestify-manual | cat
 
 for COMMIT in $(git log -n$NUM --format='%H' --reverse pytestify-manual) ; do

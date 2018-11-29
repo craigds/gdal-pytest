@@ -771,7 +771,7 @@ def main():
     query = Query(*args.files)
 
     steps = {
-        # Rename all tests `test_*`, and removes the `gdaltest_list` assignments.
+        # Rename all tests `test_*`
         0: lambda q: q.select(
             """
             expr_stmt< "gdaltest_list" "=" atom< "["
@@ -943,7 +943,7 @@ def main():
             """
             simple_stmt<
                 expr_stmt< "gdaltest_list" "=" atom< "["
-                    testnames=listmaker
+                    [ testnames=( listmaker | NAME ) ]
                 "]" > >
                 any
             >
