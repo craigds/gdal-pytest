@@ -345,7 +345,7 @@ def main():
                     >
                 >
                 op=( "<=" | "<" | ">" | ">=" )
-                abs_tolerance=NUMBER
+                abs_tolerance=any
             >
             """
         )
